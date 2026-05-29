@@ -24,33 +24,53 @@ def train():
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     criterion = nn.CrossEntropyLoss()
+    starter = torch.cuda.Event(enable_timing=True)
+    ender = torch.cuda.Event(enable_timing=True)
 
     losses_history = []
     forward_times = []
     backward_times = []
 
     for batch_idx, (data, target) in enumerate(dataloader):
-        noise = torch.randn(data.shape).to('cuda')
-        data = data.to('cuda') + noise
+        # noise = torch.randn(data.shape).to('cuda')
+        # data = data.to('cuda') + noise            
+        '''
+        Операции выполняются последовательно => пока GPU создаёт шум, CPU простаивает
+        (level 2)
+        '''   
+        noise = torch.randn(data.shape)  # сначала создаём шум на CPU
+        data = data.to('cuda', non_blocking=True)  # асинхронный перенос
+        noise = noise.to('cuda', non_blocking=True)
+        data = data + noise
         target = target.to('cuda')
+
 
         optimizer.zero_grad()
 
-        time_start = time.time()
+        '''
+        time.time() - измеряет, когда CPU отправил операцию, а не когда GPU закончил 
+        (level 3)
+        '''
+        starter.record()
         output = model(data)
         loss = criterion(output, target)
-        time_end = time.time()
-        forward_times.append(time_end - time_start)
+        ender.record()
+        torch.cuda.synchronize()
+        forward_times.append(starter.elapsed_time(ender) / 1000.0)
 
-        time_start_bwd = time.time()
+        # измеряем реальное время backward pass на GPU
+        starter.record()
         loss.backward()
-        time_end_bwd = time.time()
-        backward_times.append(time_end_bwd - time_start_bwd)
+        ender.record()
+        torch.cuda.synchronize()
+        backward_times.append(starter.elapsed_time(ender) / 1000.0)
+
         optimizer.step()
 
-        losses_history.append(loss)
+        #losses_history.append(loss) - плохо, добавляет тензор (level 1)
+        losses_history.append(loss.item())  # извлекаем число, чтобы предотвратить утечку GPU
         print(f"Batch {batch_idx} loss: {loss.item():.4f}")
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache() - вызывает синхронизацию CPU и GPU, фрагментацию памяти (level 1)
 
     print(f"Epoch finished, avg forward time is {statistics.mean(forward_times)}, "
           f"avg backward time is {statistics.mean(backward_times)}")
